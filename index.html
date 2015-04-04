@@ -48,9 +48,10 @@ var vis = d3.select("body").append("div")
 	.attr("width", w)
 	.attr("height", h);
 
+// TODO: Put high memory at the top of the screen, zero at the bottom.
 var partition = d3.layout.partition()
 	.value(function(d) { return d.size; })
-	.sort(null); // Don't sort by size, just use the order in the map file.
+	.sort(null); // Don't sort by size, just use the order in the child arrays.
 
 var checkForHtml5FileApis = function() {
 	if (window.File && window.FileReader) {
@@ -85,21 +86,50 @@ reader.onload = function(e) {
 	// Unix, inc. Mac OS:				LF      \n
 	// Excel for Mac "Save As CSV":		CR		\r
 	var lines = inputFile.split(/\r\n?|\n/); // Any of the above
-	parse(lines);
+	
+	var root = {"name": "Memory", "children": []};
+	var memoryTop = 0;
+	
+	var lineNumberToStartMemoryParsingFrom = parseMemoryConfig(lines, root);
+	
+	// Blocks are not necessarily in order. Sort them by origin.
+	root.children.sort(sortByOrigin);
+		
+	fillInBlankSpace(root);
+	
+	// console.log("Memory blocks:");
+	// console.log(root.children);
+	
+	parseMemory(lines, root, lineNumberToStartMemoryParsingFrom);
+	
+	// The root node needs an origin and an end as well
+	root.origin = root.children[0].origin;
+	root.end = root.children[root.children.length - 1].end;
+	
+	// Reverse the order of all nodes so that we're drawing 0x0 at the top of the screen.
+	reverseChildren(root);
+	
+	console.log("root:");
+	console.log(root);
+	
+	// Don't let any node at the block level get smaller than what we can click on.
+	// Probably not a good idea.
+	// enlargeTinyBlocks(root);
+	
+	display(root);
     
     // Blank out the file chooser field. If we don't do this, choosing the same file again
     // after editing doesn't change the value and the change() handler is never called.
     $("#file").val("");
 };
 
-var parse = function(lines) {
-	var root = {"name": "Memory", "children": []};
+var parseMemoryConfig = function(lines, root) {
 	var inMemoryConfig = false;
-	var inBody = false;
-	var chunkCount = 0;
+	var lineNumber = 0;
 	
 	for (var l = 0; l < lines.length; l++) {
 		var line = lines[l];
+		lineNumber++;
 		
 		// Memory configuration looks like this:
 		// Name             Origin             Length             Attributes
@@ -118,6 +148,12 @@ var parse = function(lines) {
 		var cells = line.trim().split(/\s+/);
 		
 		if (inMemoryConfig) {
+			// We know we're done with the memory configuration section when we see a blank line.
+			if (cells.length == 1 && cells[0] == "") {
+				// Return the line number we're on now so that the next function can pick up from here.
+				return lineNumber;
+			}
+			
 			var name = cells[0];
 			var origin = parseInt(removeLeading0x(cells[1]), 16);
 			var declaredSize = parseInt(removeLeading0x(cells[2]), 16);
@@ -129,28 +165,137 @@ var parse = function(lines) {
 				continue;
 			}
 			
-			// We know we're done with the memory configuration section when we see a blank line.
-			if (cells.length == 1 && cells[0] == "") {
-				inMemoryConfig = false;
-				inBody = true;
-				continue;
-			}
-			
 			// A block's declared size is not just the sum of its children - it can have space left
 			// over. D3 will set the size of a node to the sum of it's children, but there's no
 			// child for free space left over. We create one later.
 			var block = {"name": name, "declaredSize": declaredSize, "origin": origin, "end": end,
 					"children": []};
 			root.children.push(block);
-			
-			console.log("Block:");
-			console.log(block);
-			
+		}
+	}	
+};
+
+var fillInBlankSpace = function(root) {
+	// Let d3 calculate the size of each node based on the sum of its children.
+	var nodes = partition.nodes(root);
+	
+	// Figure out where the top of our memory is.
+	memoryTop = 0;
+	
+	for (var i = 0; i < root.children.length; i++) {
+		var block = root.children[i];
+		
+		if (block.end > memoryTop) {
+			memoryTop = block.end;
+		}
+	}
+	
+	console.log("Top of memory: " + toHex(memoryTop));
+	
+	// Figure out the average size of a declared memory block.
+	var averageBlockSize = 0;
+	var totalBlockMemory = 0;
+	
+	for (var i = 0; i < root.children.length; i++) {
+		var block = root.children[i];
+		
+		if (typeof(block.declaredSize) == "undefined") {
 			continue;
 		}
-		else if (!inBody) {
-			continue;
+		
+		totalBlockMemory += block.declaredSize;
+	}
+	
+	averageBlockSize = totalBlockMemory / root.children.length;
+	
+	console.log("Average declared block size: " + toHex(averageBlockSize));
+	
+	// If the first block doesn't start at zero, put some free space in before it. Because free
+	// space can be thousands of times larger than the blocks it surrounds, don't draw this to
+	// scale. Just make it about the same size as everything else.
+	if (typeof root.children !== 'undefined' && root.children.length > 0) {
+		var firstBlock = root.children[0];
+		
+		if (firstBlock.origin != 0) {
+			var initialFreeSpace = {"name": "FREE",
+					"children": [],
+					"origin": 0,
+					"size": averageBlockSize,
+					"sizeForLabel": firstBlock.origin,
+					"end": firstBlock.origin - 1};
+			
+			console.log("Adding free space before first declared block: " + toHex(firstBlock.origin));
+			// console.log(initialFreeSpace);
+			
+			root.children.push(initialFreeSpace);
+			root.children.sort(sortByOrigin);
+			nodes = partition.nodes(root);
 		}
+	}
+	
+	// Fill in the blank space between blocks. Because free space can be thousands of times larger
+	// than the blocks it surrounds, don't draw this to scale. Just make it about the same size as
+	// everything else.
+	for (var i = 0; i < root.children.length; i++) {
+		var thisBlock = root.children[i];
+		var nextBlock = root.children[i + 1];
+		
+		if (typeof nextBlock == "undefined") {
+			// End of blocks. Done.
+			break;
+		}
+		
+		var spaceBetween = nextBlock.origin - thisBlock.end;
+		
+		if (spaceBetween > 1) {
+			var freeSpace = {"name": "FREE",
+					"children": [],
+					"origin": thisBlock.end,
+					"size": averageBlockSize,
+					"sizeForLabel": spaceBetween,
+					"end": thisBlock.end + spaceBetween};
+			
+			console.log("Block " + thisBlock.name + " ends at " + toHex(thisBlock.end)
+					+ " and the next one, " + nextBlock.name + ", starts at "
+					+ toHex(nextBlock.origin) + ". Adding free space between blocks: "
+					+ toHex(spaceBetween));
+			// console.log(freeSpace);
+			
+			root.children.push(freeSpace);
+			root.children.sort(sortByOrigin);
+			nodes = partition.nodes(root);
+		}		
+	}
+	
+	// Create nodes for left over free space inside each block. This is to scale.
+	for (var i = 0; i < root.children.length; i++) {
+		var block = root.children[i];
+		
+		if (block.value < block.declaredSize) {
+			var freeSpace = {"name": "FREE",
+					"children": [],
+					"size": (block.declaredSize - block.value)};
+			
+			if (typeof block.children == "undefined") {
+				block.children = [];
+			}
+			
+			block.children.push(freeSpace);
+		}
+	}
+	
+	// Let d3 process the nodes again now that the free space is there.
+	nodes = partition.nodes(root);
+};
+
+var parseMemory = function(lines, root, lineNumberToStartMemoryParsingFrom) {
+	var chunkCount = 0;
+	
+	for (var l = lineNumberToStartMemoryParsingFrom; l < lines.length; l++) {
+		var line = lines[l];
+		
+		// Split line into cells based on any whitespace.
+		var cells = line.trim().split(/\s+/);
 
 		// We're done once we reach the end of the stack. Ignore debug symbols and so on.
 		if (line.indexOf("OUTPUT") == 0) {
@@ -188,6 +333,11 @@ var parse = function(lines) {
 			
 			if (startAddress >= b.origin && startAddress < b.end) {
 				block = b;
+				
+				// console.log("Chunk " + sectionName + " with start address " + startAddress
+				//		+ " is within block:");
+				// console.log(block);
+				
 				break;
 			}
 		}
@@ -196,6 +346,11 @@ var parse = function(lines) {
 			console.log("Can't find which block of memory" + cells[1] + " is in. Ignoring "
 					+ sourceFile);
 			continue;
+		}
+		
+		// Seems that d3 removes the children array when it's empty.
+		if (typeof(block.children) == "undefined") {
+			block.children = [];
 		}
 
 		// Find the memory section within the block, or create it if this is the first time we've
@@ -229,8 +384,118 @@ var parse = function(lines) {
 		}
 	}
 	
-	console.log("Displaying " + chunkCount + " chunks of memory.");
-	display(root);
+	console.log("Found " + chunkCount + " chunks of memory.");
+};
+
+var reverseChildren = function(node) {
+	if (!node || !node.children || node.children.length <= 1) return;
+	
+	node.children.reverse();
+	
+	for (var i = 0; i < node.children.length; i++) {
+		var child = node.children[i];
+		reverseChildren(child);
+	}
+};
+
+var enlargeTinyBlocks = function(root) {
+	var minimumBlockValue = Math.round(memoryTop / 100000);
+	
+	for (var i = 0; i < root.children.length; i++) {
+		var block = root.children[i];
+		
+		// By now, every block either has a size, calculated by d3, or a declared size from
+		// the .Map file.
+		var effectiveSize = block.size ? block.size : block.declaredSize;
+		
+		if (effectiveSize < minimumBlockValue) {
+			console.log("Enlarging tiny block " + block.name + " from " + toHex(effectiveSize)
+					+ " to " + toHex(minimumBlockValue) + ".");
+			
+			block.size = minimumBlockValue;
+		}
+	}
+	
+	nodes = partition.nodes(root);
+};
+
+var display = function(root) {
+	nodes = partition.nodes(root);
+	
+	var g = vis.selectAll("g")
+		.data(nodes)
+		.enter().append("svg:g")
+		.attr("transform", function(d) { return "translate(" + x(d.y) + "," + y(d.x) + ")"; })
+		.on("click", click);
+
+	var kx = w / root.dx,
+		ky = h / 1;
+	
+	var nodeLabel = function(d) {
+		if (d.sizeForLabel) {
+			return d.name + ": " + toHex(d.sizeForLabel) + " (not to scale)";
+		}
+		else {
+			return d.name + ": " + toHex(d.value);
+		}
+	};
+
+	g.append("svg:rect")
+		.attr("width", root.dy * kx)
+		.attr("height", function(d) { return d.dx * ky; })
+		.attr("class", function(d) { return d.children ? "parent" : "child"; });
+
+	// End
+	g.append("svg:text")
+		.attr("transform", function(d) { return "translate(4,10)"; })
+		.attr("dy", ".35em")
+		.style("opacity", function(d) { return d.dx * ky > 12 ? 1 : 0; })
+		.style("font-size", "1em")
+		.text(function(d) { return toHex(d.end); });
+	
+	// Label
+	g.append("svg:text")
+		.attr("transform", function(d) { return "translate(16," + d.dx * ky / 2 + ")"; })
+		.attr("dy", ".35em")
+		.style("opacity", function(d) { return d.dx * ky > 12 ? 1 : 0; })
+		.style("font-size", "1em")
+		.text(nodeLabel);
+	
+	// Origin
+	g.append("svg:text")
+		.attr("transform", function(d) { return "translate(4," + ((d.dx * ky) - 10) + ")"; })
+		.attr("dy", ".35em")
+		.style("opacity", function(d) { return d.dx * ky > 12 ? 1 : 0; })
+		.style("font-size", "1em")
+		.text(function(d) { return toHex(d.origin); });
+
+	d3.select(window)
+		.on("click", function() { click(root); });
+
+	// On clicking a node, redo the layout with that node as the root.
+	function click(d) {
+		if (!d.children) return;
+
+		kx = (d.y ? w - 40 : w) / (1 - d.y);
+		ky = h / d.dx;
+		x.domain([d.y, 1]).range([d.y ? 40 : 0, w]);
+		y.domain([d.x, d.x + d.dx]);
+
+		var t = g.transition()
+			.duration(d3.event.altKey ? 7500 : 750)
+			.attr("transform", function(d) { return "translate(" + x(d.y) + "," + y(d.x) + ")"; });
+
+		t.select("rect")
+			.attr("width", d.dy * kx)
+			.attr("height", function(d) { return d.dx * ky; });
+
+		// TODO: Scale end, label and origin
+		// t.select("text")
+		// 	.attr("transform", function(d) { return "translate(12," + d.dx * ky / 2 + ")"; })
+		// 	.style("opacity", function(d) { return d.dx * ky > 12 ? 1 : 0; });
+
+		d3.event.stopPropagation();
+	}
 };
 
 var isSourceLine = function(cells) {
@@ -257,86 +522,35 @@ var removeLeading0x = function(value) {
 	}
 	
 	return value.substring(2, value.length);
-}
+};
+
+var toHex = function(value) {
+	if (!value) return value;
+	
+	if (isNaN(value)) return value;
+	
+	return "0x" + value.toString(16).toUpperCase();
+};
+
+var sortByOrigin = function(a, b) {
+	if (!a || !b) return 0;
+	
+	if (typeof a.origin == "undefined" || typeof b.origin == "undefined") return 0;
+	
+	if (a.origin == b.origin) {
+		return 0;
+	}
+	else if (a.origin > b.origin) {
+		return 1;
+	}
+	else {
+		return -1;
+	}
+};
 
 var filenameFromPath = function(value) {
 	var lastSlash = value.lastIndexOf("/");
 	return value.substring(lastSlash + 1, value.length);
-}
-
-var display = function(root) {
-	var nodes = partition.nodes(root);
-	
-	// Now that d3 has calculated the size of each node based on the sum of their children, create
-	// nodes for left over free space in each block.
-	for (var i = 0; i < root.children.length; i++) {
-		var block = root.children[i];
-
-		if (block.value < block.declaredSize) {
-			var freeSpace = {"name": "FREE", "size": (block.declaredSize - block.value)};
-			
-			if (typeof block.children == "undefined") {
-				block.children = [];
-			}
-			
-			block.children.push(freeSpace);
-		}
-	}
-	
-	// Let d3 process the nodes again now that the free space is there.
-	nodes = partition.nodes(root);
-	
-	var g = vis.selectAll("g")
-		.data(nodes)
-		.enter().append("svg:g")
-		.attr("transform", function(d) { return "translate(" + x(d.y) + "," + y(d.x) + ")"; })
-		.on("click", click);
-
-	var kx = w / root.dx,
-		ky = h / 1;
-
-	g.append("svg:rect")
-		.attr("width", root.dy * kx)
-		.attr("height", function(d) { return d.dx * ky; })
-		.attr("class", function(d) { return d.children ? "parent" : "child"; });
-
-	g.append("svg:text")
-		.attr("transform", transform)
-		.attr("dy", ".35em")
-		.style("opacity", function(d) { return d.dx * ky > 12 ? 1 : 0; })
-		.style("font-size", "1em")
-		.text(function(d) { return d.name + ": " + d.value.toLocaleString(); });
-
-	d3.select(window)
-		.on("click", function() { click(root); })
-
-	// On clicking a node, redo the layout with that node as the root.
-	function click(d) {
-		if (!d.children) return;
-
-		kx = (d.y ? w - 40 : w) / (1 - d.y);
-		ky = h / d.dx;
-		x.domain([d.y, 1]).range([d.y ? 40 : 0, w]);
-		y.domain([d.x, d.x + d.dx]);
-
-		var t = g.transition()
-			.duration(d3.event.altKey ? 7500 : 750)
-			.attr("transform", function(d) { return "translate(" + x(d.y) + "," + y(d.x) + ")"; });
-
-		t.select("rect")
-			.attr("width", d.dy * kx)
-			.attr("height", function(d) { return d.dx * ky; });
-
-		t.select("text")
-			.attr("transform", transform)
-			.style("opacity", function(d) { return d.dx * ky > 12 ? 1 : 0; });
-
-		d3.event.stopPropagation();
-	}
-
-	function transform(d) {
-		return "translate(8," + d.dx * ky / 2 + ")";
-	}
 };
 
 $(document).ready(function() {
