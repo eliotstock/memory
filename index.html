@@ -142,6 +142,10 @@ var parse = function(lines) {
 			var block = {"name": name, "declaredSize": declaredSize, "origin": origin, "end": end,
 					"children": []};
 			root.children.push(block);
+			
+			console.log("Block:");
+			console.log(block);
+			
 			continue;
 		}
 		else if (!inBody) {
@@ -189,8 +193,8 @@ var parse = function(lines) {
 		}
 		
 		if (block == null) {
-			console.log("Can't find which block of memory " + startAddress
-					+ " is in. Ignoring " + sourceFile);
+			console.log("Can't find which block of memory" + cells[1] + " is in. Ignoring "
+					+ sourceFile);
 			continue;
 		}
 
@@ -207,15 +211,19 @@ var parse = function(lines) {
 		
 		var chunk = {"name": sourceFile, "size": size};
 		// console.log(chunk);
+		
 		if (section.children.length > 0) {
 			var last_chunk = section.children[section.children.length - 1];
+			
 			if (last_chunk.name == chunk.name) {
 				last_chunk.size += chunk.size;
-			} else {
+			}
+			else {
 				section.children.push(chunk);
 				chunkCount++;
 			}
-		} else {
+		}
+		else {
 			section.children.push(chunk);
 			chunkCount++;
 		}
@@ -266,6 +274,11 @@ var display = function(root) {
 
 		if (block.value < block.declaredSize) {
 			var freeSpace = {"name": "FREE", "size": (block.declaredSize - block.value)};
+			
+			if (typeof block.children == "undefined") {
+				block.children = [];
+			}
+			
 			block.children.push(freeSpace);
 		}
 	}
