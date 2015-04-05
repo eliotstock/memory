@@ -48,10 +48,11 @@ var vis = d3.select("body").append("div")
 	.attr("width", w)
 	.attr("height", h);
 
-// TODO: Put high memory at the top of the screen, zero at the bottom.
+// The "size" property of each node gives d3 its drawn height.
+// Don't sort by size, just use the order in the child arrays.
 var partition = d3.layout.partition()
 	.value(function(d) { return d.size; })
-	.sort(null); // Don't sort by size, just use the order in the child arrays.
+	.sort(null);
 
 var checkForHtml5FileApis = function() {
 	if (window.File && window.FileReader) {
@@ -90,24 +91,34 @@ reader.onload = function(e) {
 	var root = {"name": "Memory", "children": []};
 	var memoryTop = 0;
 	
-	var lineNumberToStartMemoryParsingFrom = parseMemoryConfig(lines, root);
+	var blocksLines = getBlocksLines(lines);
+	// console.log("blocks lines from *.Map file:");
+	// console.log(blocksLines);
+	parseMemoryConfig(blocksLines, root);
 	
 	// Blocks are not necessarily in order. Sort them by origin.
 	root.children.sort(sortByOrigin);
-		
-	fillInBlankSpace(root);
 	
+	fillInBlankSpaceBetweenBlocks(root);
+		
 	// console.log("Memory blocks:");
 	// console.log(root.children);
 	
-	parseMemory(lines, root, lineNumberToStartMemoryParsingFrom);
+	var memoryMapLines = getMemoryMapLines(lines);
+	// console.log("sections lines from *.Map file:");
+	// console.log(sectionsLines);
+	parseMemory(memoryMapLines, root);
+	
+	fillInBlankSpaceWithinBlocks(root);
 	
 	// The root node needs an origin and an end as well
 	root.origin = root.children[0].origin;
 	root.end = root.children[root.children.length - 1].end;
 	
-	// Reverse the order of all nodes so that we're drawing 0x0 at the top of the screen.
-	reverseChildren(root);
+	// Reverse the order of blocks so that we're drawing 0x0 at the bottom of the screen. Within
+	// blocks though, sections fill up from bottom to top.
+	// reverseChildren(root);
+	root.children.reverse();
 	
 	console.log("root:");
 	console.log(root);
@@ -123,59 +134,138 @@ reader.onload = function(e) {
     $("#file").val("");
 };
 
-var parseMemoryConfig = function(lines, root) {
+// Pull out just the interesting lines from the "Memory Configuration" part of the *.Map file,
+// which looks like this:
+//
+// Name             Origin             Length             Attributes
+// FLASH            0x0000000000016000 0x000000000002a000 xr
+// RAM              0x0000000020002000 0x0000000000002000 xrw
+// *default*        0x0000000000000000 0xffffffffffffffff	
+var getBlocksLines = function(lines) {
 	var inMemoryConfig = false;
-	var lineNumber = 0;
+	var relevantLines = [];
 	
 	for (var l = 0; l < lines.length; l++) {
 		var line = lines[l];
-		lineNumber++;
 		
-		// Memory configuration looks like this:
-		// Name             Origin             Length             Attributes
-		// FLASH            0x0000000000016000 0x000000000002a000 xr
-		// RAM              0x0000000020002000 0x0000000000002000 xrw
-		// *default*        0x0000000000000000 0xffffffffffffffff
 		if (line.indexOf("Name") != -1
 				&& line.indexOf("Origin") != -1
 				&& line.indexOf("Length") != -1) {
-			// Memory configuration starts on the next line
+			// We're interested in the next line onwards.
 			inMemoryConfig = true;
 			continue;
 		}
 		
+		if (inMemoryConfig) {
+			var words = line.trim().split(/\s+/);
+			
+			// We know we're done with the memory configuration section when we see a blank line.
+			if (words.length == 1 && words[0] == "") {
+				break;
+			}
+			
+			relevantLines.push(line);
+		}
+	}
+	
+	return relevantLines;
+}
+
+var getMemoryMapLines = function(lines) {
+	var inMemoryMap = false;
+	var seenLinkerScriptHeading = false;
+	var blankLinesSinceLinkerScriptHeading = 0;
+	var relevantLines = [];
+	
+	for (var l = 0; l < lines.length; l++) {
+		var line = lines[l];
+		
+		if (line == "Linker script and memory map") {
+			seenLinkerScriptHeading = true;
+			continue;
+		}
+		
+		if (seenLinkerScriptHeading) {
+			if (line == "") {
+				blankLinesSinceLinkerScriptHeading++;
+			}
+		}
+		
+		if (blankLinesSinceLinkerScriptHeading == 2) {
+			inMemoryMap = true;
+		}
+		
+		if (inMemoryMap) {
+			// We're done once we reach the end of the stack. Ignore debug symbols and so on.
+			if (line.indexOf("OUTPUT") == 0) {
+				break;
+			}
+			
+			relevantLines.push(line);
+		}
+	}
+	
+	// Long section names will force the linker to break the line into two. Unbreak these so
+	// they're easier to handle below. Any single word lines followed by a line with two or more
+	// words should be joined up.
+	var unbrokenLines = [];
+	var singleWordLine = null;
+	
+	for (var l = 0; l < relevantLines.length; l++) {
+		var line = relevantLines[l];
+		
+		if (line == "") continue;
+		
+		var words = line.trim().split(/\s+/);
+		
+		if (words.length == 1) {
+			// Remember this word and read the next line.
+			singleWordLine = words[0];
+			continue;
+		}
+		
+		if (singleWordLine != null && words.length >= 2) {
+			// Last line was a single word and this line has two or more. Join them.
+			var unbrokenLine = singleWordLine + line;
+			unbrokenLines.push(unbrokenLine);
+			singleWordLine = null;
+			continue;
+		}
+		
+		unbrokenLines.push(line);
+	}
+	
+	return unbrokenLines;
+}
+
+var parseMemoryConfig = function(lines, root) {
+	for (var l = 0; l < lines.length; l++) {
+		var line = lines[l];
+		
 		// Split line into cells based on any whitespace.
 		var cells = line.trim().split(/\s+/);
 		
-		if (inMemoryConfig) {
-			// We know we're done with the memory configuration section when we see a blank line.
-			if (cells.length == 1 && cells[0] == "") {
-				// Return the line number we're on now so that the next function can pick up from here.
-				return lineNumber;
-			}
-			
-			var name = cells[0];
-			var origin = parseInt(removeLeading0x(cells[1]), 16);
-			var declaredSize = parseInt(removeLeading0x(cells[2]), 16);
-			var end = origin + declaredSize;
-			
-			// Ignore a line like:
-			// *default*        0x0000000000000000 0xffffffffffffffff
-			if (name == "*default*") {
-				continue;
-			}
-			
-			// A block's declared size is not just the sum of its children - it can have space left
-			// over. D3 will set the size of a node to the sum of it's children, but there's no
-			// child for free space left over. We create one later.
-			var block = {"name": name, "declaredSize": declaredSize, "origin": origin, "end": end,
-					"children": []};
-			root.children.push(block);
+		var name = cells[0];
+		var origin = parseInt(removeLeading0x(cells[1]), 16);
+		var declaredSize = parseInt(removeLeading0x(cells[2]), 16);
+		var end = origin + declaredSize;
+		
+		// Ignore a line like:
+		// *default*        0x0000000000000000 0xffffffffffffffff
+		if (name == "*default*") {
+			continue;
 		}
+		
+		var block = {"name": name,
+				"declaredSize": declaredSize,
+				"origin": origin,
+				"end": end,
+				"children": []};
+		root.children.push(block);
 	}	
 };
 
-var fillInBlankSpace = function(root) {
+var fillInBlankSpaceBetweenBlocks = function(root) {
 	// Let d3 calculate the size of each node based on the sum of its children.
 	var nodes = partition.nodes(root);
 	
@@ -267,6 +357,14 @@ var fillInBlankSpace = function(root) {
 		}		
 	}
 	
+	// Let d3 process the nodes again now that the free space is there.
+	nodes = partition.nodes(root);
+};
+
+var fillInBlankSpaceWithinBlocks = function(root) {
+	// Let d3 calculate the size of each node based on the sum of its children.
+	var nodes = partition.nodes(root);
+	
 	// Create nodes for left over free space inside each block. This is to scale.
 	for (var i = 0; i < root.children.length; i++) {
 		var block = root.children[i];
@@ -288,103 +386,120 @@ var fillInBlankSpace = function(root) {
 	nodes = partition.nodes(root);
 };
 
-var parseMemory = function(lines, root, lineNumberToStartMemoryParsingFrom) {
+var parseMemory = function(lines, root) {
+	var sectionCount = 0;
 	var chunkCount = 0;
+	var section = null;
 	
-	for (var l = lineNumberToStartMemoryParsingFrom; l < lines.length; l++) {
+	for (var l = 0; l < lines.length; l++) {
 		var line = lines[l];
 		
-		// Split line into cells based on any whitespace.
+		// Split line into words based on any whitespace.
 		var cells = line.trim().split(/\s+/);
-
-		// We're done once we reach the end of the stack. Ignore debug symbols and so on.
-		if (line.indexOf("OUTPUT") == 0) {
-			break;
-		}
 		
-		// Ignore lines that aren't for a source file. Later we may want to go down to the symbol
-		// lines below that.
-		if (!isSourceLine(cells)) {
+		if (!isSectionLine(cells) && !isSourceLine(cells)) {
 			continue;
 		}
 		
 		// Memory section, eg. .text, .data., .bss.
+		// This is also often something like ".text._scanf_float", which should be treated as
+		// section ".text", and NOT ".text._scanf_float".
 		var sectionName = cells[0];
+		
+		if (sectionName == "*fill*") {
+			// eg. " *fill*         0x0000000000041d3c        0x4 "
+			// Ignore these. They look like sections but are reallt symbol-level stuff.
+			continue;
+		}
 		
 		// Start address in memory, eg. 0x000000002000210c, as integer.
 		var startAddress = parseInt(removeLeading0x(cells[1]), 16);
 		
-		// Size of this chunk of memory, eg. 0x1f4, as integer.
+		// Size of this section or chunk of memory, eg. 0x1f4, as integer.
 		var size = parseInt(removeLeading0x(cells[2]), 16);
-		
-		// C or assembler source file for this chunk of memory.
-		var sourceFile = filenameFromPath(cells[3]);
 		
 		// Ignore anything with size zero.
 		if (size == 0) {
 			continue;
 		}
 		
-		// Find the first block of memory that this start address falls within.
-		var block = null;
+		// Section lines are not indented and have three words.
+		//   eg. ".text           0x0000000000038000    0x102ec"
+		if (isSectionLine(cells)) {
+			section = addSection(root, sectionName, startAddress, size);
+			sectionCount++;
+		}
 		
-		for (var i = 0; i < root.children.length; i++) {
-			var b = root.children[i];
+		// Source lines are indented one space and have four words.
+		//   eg. " .Vectors       0x0000000000038000       0xc0 _build/gcc_startup_nrf51.os"
+		// The section this chunk goes into depends on it's start address and NOT on the section
+		// name on this line, since that's often something like ".text._scanf_float".
+		if (isSourceLine(cells)) {
+			// C or assembler source file for this chunk of memory.
+			var sourceFile = filenameFromPath(cells[3]);
 			
-			if (startAddress >= b.origin && startAddress < b.end) {
-				block = b;
-				
-				// console.log("Chunk " + sectionName + " with start address " + startAddress
-				//		+ " is within block:");
-				// console.log(block);
-				
-				break;
+			if (section == null) {
+				console.log("Source file " + sourceFile + " has no enclosing section. Skipping.");
+				continue;
 			}
-		}
-		
-		if (block == null) {
-			console.log("Can't find which block of memory" + cells[1] + " is in. Ignoring "
-					+ sourceFile);
-			continue;
-		}
-		
-		// Seems that d3 removes the children array when it's empty.
-		if (typeof(block.children) == "undefined") {
-			block.children = [];
-		}
-
-		// Find the memory section within the block, or create it if this is the first time we've
-		// seen it.
-		var section = block.children.filter(function(child) {
-			return child.name == sectionName;
-		})[0];
-		
-		if (section == null) {
-			section = {"name": sectionName, "children": []};
-			block.children.push(section);
-		}
-		
-		var chunk = {"name": sourceFile, "size": size};
-		// console.log(chunk);
-		
-		if (section.children.length > 0) {
-			var last_chunk = section.children[section.children.length - 1];
 			
-			if (last_chunk.name == chunk.name) {
-				last_chunk.size += chunk.size;
-			}
-			else {
-				section.children.push(chunk);
-				chunkCount++;
-			}
-		}
-		else {
+			// addChunk(root, sourceFile, startAddress, size);
+			
+			// Don't bother with an "end" field on chunks.
+			var chunk = {"name": sourceFile,
+					"origin": startAddress,
+					"size": size};
 			section.children.push(chunk);
 			chunkCount++;
 		}
 	}
 	
-	console.log("Found " + chunkCount + " chunks of memory.");
+	console.log("Found " + chunkCount + " chunks of memory across " + sectionCount + " sections.");
+};
+
+var addSection = function(root, sectionName, startAddress, size) {
+	// Find the first block of memory that this start address falls within.
+	var block = null;
+	
+	for (var i = 0; i < root.children.length; i++) {
+		var b = root.children[i];
+		
+		if (startAddress >= b.origin && startAddress < b.end) {
+			block = b;
+			break;
+		}
+	}
+	
+	if (block == null) {
+		console.log("Can't find which block of memory" + startAddress + " is in. Ignoring section "
+				+ sectionName);
+		return;
+	}
+	
+	// Seems that d3 removes the children array when it's empty.
+	if (typeof(block.children) == "undefined") {
+		block.children = [];
+	}
+	
+	// There shouldn't already be a section by this name in this block. Warn if so.
+	var section = block.children.filter(function(child) {
+		return child.name == sectionName;
+	})[0];
+	
+	if (section != null) {
+		console.log("Replacing existing section " + sectionName + " in block " + block.name);
+		var index = block.children.indexOf(section);
+		block.children.splice(index, 1);
+	}
+	
+	section = {"name": sectionName,
+			"children": [],
+			"origin": startAddress,
+			"size": size,
+			"end": (startAddress + size)};
+	block.children.push(section);
+	
+	return section;
 };
 
 var reverseChildren = function(node) {
@@ -422,19 +537,12 @@ var enlargeTinyBlocks = function(root) {
 var display = function(root) {
 	nodes = partition.nodes(root);
 	
-	// Zoom doesn't work
-	// var zoomListener = d3.behavior.zoom()
-	// 	.scaleExtent([1, 3])
-	// 	.on("zoom", zoomHandler);
-	
 	var g = vis.selectAll("g")
 		.data(nodes)
 		.enter().append("svg:g")
 		.attr("transform", function(d) { return "translate(" + x(d.y) + "," + y(d.x) + ")"; })
 		.on("click", click);
 	
-	// zoomListener(g);
-
 	var kx = w / root.dx,
 		ky = h / 1;
 	
@@ -443,8 +551,14 @@ var display = function(root) {
 		
 		if (typeof(d.origin) == "number" && typeof(d.end) == "number") {
 			label += ": ";
-			var realSize = toHex(d.end - d.origin);
-			label += realSize;
+			var realSize = d.end - d.origin;
+			
+			if (d.value > d.declaredSize) {
+				label += "Overflowed from " + toHex(d.declaredSize) + " to " + toHex(d.value);
+			}
+			else {
+				label += toHex(realSize);
+			}
 		}
 		else if (typeof(d.size) == "number") {
 			label += ": " + toHex(d.size);
@@ -464,7 +578,7 @@ var display = function(root) {
 		.attr("transform", function(d) { return "translate(4,10)"; })
 		.attr("dy", ".35em")
 		.style("opacity", function(d) { return d.dx * ky > 12 ? 1 : 0; })
-		.style("font-size", "1em")
+		.style("font-size", function(d) { if (d.depth <= 1) {return "1em";} else {return "0.6em";} })
 		.text(function(d) { return toHex(d.end); });
 	
 	// Label, middle
@@ -473,6 +587,7 @@ var display = function(root) {
 		.attr("transform", function(d) { return "translate(16," + d.dx * ky / 2 + ")"; })
 		.attr("dy", ".35em")
 		.style("opacity", function(d) { return d.dx * ky > 12 ? 1 : 0; })
+		.style("font-weight", function(d) { if (d.value > d.declaredSize) { return "bold"; } else { return "normal"; }})
 		.style("font-size", "1em")
 		.text(nodeLabel);
 	
@@ -482,7 +597,7 @@ var display = function(root) {
 		.attr("transform", function(d) { return "translate(4," + ((d.dx * ky) - 10) + ")"; })
 		.attr("dy", ".35em")
 		.style("opacity", function(d) { return d.dx * ky > 12 ? 1 : 0; })
-		.style("font-size", "1em")
+		.style("font-size", function(d) { if (d.depth <= 1) {return "1em"; } else {return "0.6em"; }})
 		.text(function(d) { return toHex(d.origin); });
 
 	d3.select(window)
@@ -523,24 +638,40 @@ var display = function(root) {
 
 		d3.event.stopPropagation();
 	}
-	
-	// function zoomHandler() {
-	// 	vis.attr("transform", "translate(" + d3.event.translate + ")scale(" + d3.event.scale + ")");
-	// }
 };
 
-var isSourceLine = function(cells) {
-	if (cells == null) return false;
+// Section lines have three words. They're also NOT indented, but we don't check for that.
+//   eg. ".text           0x0000000000038000    0x102ec"
+var isSectionLine = function(words) {
+	if (words == null) return false;
 	
-	if (cells.length === undefined) return false;
+	if (words.length === undefined) return false;
 	
-	if (cells.length != 4) return false;
+	if (words.length != 3) return false;
 	
-	// Second cell must start with 0x
-	if (cells[1].indexOf("0x") != 0) return false;
+	// Second word must start with 0x
+	if (words[1].indexOf("0x") != 0) return false;
 	
-	// Third cell must also start with 0x
-	if (cells[2].indexOf("0x") != 0) return false;
+	// Third word must also start with 0x
+	if (words[2].indexOf("0x") != 0) return false;
+	
+	return true;
+}
+
+// Source lines have four words. They're also indented one space, but we don't check for that.
+//   eg. " .Vectors       0x0000000000038000       0xc0 _build/gcc_startup_nrf51.os"
+var isSourceLine = function(words) {
+	if (words == null) return false;
+	
+	if (words.length === undefined) return false;
+	
+	if (words.length != 4) return false;
+	
+	// Second word must start with 0x
+	if (words[1].indexOf("0x") != 0) return false;
+	
+	// Third word must also start with 0x
+	if (words[2].indexOf("0x") != 0) return false;
 	
 	return true;
 };
