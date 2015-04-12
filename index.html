@@ -33,6 +33,9 @@ limitations under the License.
 <script src="http://d3js.org/d3.v3.min.js" type="text/javascript"></script>
 <script>
 
+var SORT_CHUNKS_BY_SIZE = false;
+var FILL_IN_BLANK_SPACE_BETWEEN_REGIONS = false;
+
 var w = 1120,
     h = 680,
     x = d3.scale.linear().range([0, w]),
@@ -91,17 +94,22 @@ reader.onload = function(e) {
 	var root = {"name": "Memory", "children": []};
 	var memoryTop = 0;
 	
-	var blocksLines = getBlocksLines(lines);
-	// console.log("blocks lines from *.Map file:");
-	// console.log(blocksLines);
-	parseMemoryConfig(blocksLines, root);
+	var regionsLines = getRegionsLines(lines);
+	// console.log("regions lines from *.Map file:");
+	// console.log(regionsLines);
+	parseMemoryConfig(regionsLines, root);
 	
-	// Blocks are not necessarily in order. Sort them by origin.
+	// Regions are not necessarily in order. Sort them by origin.
 	root.children.sort(sortByOrigin);
 	
-	fillInBlankSpaceBetweenBlocks(root);
+	// On the Nordic, space within flash would be nice to see, and within RAM, but not between the
+	// end of flash and the start of RAM. That's all too messy and Nordic-specific to do, so just
+	// switch this on and off as you see fit.
+	if (FILL_IN_BLANK_SPACE_BETWEEN_REGIONS) {
+		fillInBlankSpaceBetweenRegions(root);
+	}
 		
-	// console.log("Memory blocks:");
+	// console.log("Memory regions:");
 	// console.log(root.children);
 	
 	var memoryMapLines = getMemoryMapLines(lines);
@@ -109,23 +117,22 @@ reader.onload = function(e) {
 	// console.log(sectionsLines);
 	parseMemory(memoryMapLines, root);
 	
-	fillInBlankSpaceWithinBlocks(root);
+	fillInBlankSpaceWithinRegions(root);
 	
 	// The root node needs an origin and an end as well
 	root.origin = root.children[0].origin;
 	root.end = root.children[root.children.length - 1].end;
 	
-	// Reverse the order of blocks so that we're drawing 0x0 at the bottom of the screen. Within
-	// blocks though, sections fill up from bottom to top.
-	// reverseChildren(root);
+	// Reverse the order of regions so that we're drawing 0x0 at the bottom of the screen. Within
+	// regions though, sections fill up from bottom to top.
 	root.children.reverse();
 	
 	console.log("root:");
 	console.log(root);
 	
-	// Don't let any node at the block level get smaller than what we can click on.
+	// Don't let any node at the region level get smaller than what we can click on.
 	// Probably not a good idea.
-	// enlargeTinyBlocks(root);
+	// enlargeTinyRegions(root);
 	
 	display(root);
     
@@ -141,7 +148,7 @@ reader.onload = function(e) {
 // FLASH            0x0000000000016000 0x000000000002a000 xr
 // RAM              0x0000000020002000 0x0000000000002000 xrw
 // *default*        0x0000000000000000 0xffffffffffffffff	
-var getBlocksLines = function(lines) {
+var getRegionsLines = function(lines) {
 	var inMemoryConfig = false;
 	var relevantLines = [];
 	
@@ -256,16 +263,16 @@ var parseMemoryConfig = function(lines, root) {
 			continue;
 		}
 		
-		var block = {"name": name,
+		var region = {"name": name,
 				"declaredSize": declaredSize,
 				"origin": origin,
 				"end": end,
 				"children": []};
-		root.children.push(block);
+		root.children.push(region);
 	}	
 };
 
-var fillInBlankSpaceBetweenBlocks = function(root) {
+var fillInBlankSpaceBetweenRegions = function(root) {
 	// Let d3 calculate the size of each node based on the sum of its children.
 	var nodes = partition.nodes(root);
 	
@@ -273,48 +280,48 @@ var fillInBlankSpaceBetweenBlocks = function(root) {
 	memoryTop = 0;
 	
 	for (var i = 0; i < root.children.length; i++) {
-		var block = root.children[i];
+		var region = root.children[i];
 		
-		if (block.end > memoryTop) {
-			memoryTop = block.end;
+		if (region.end > memoryTop) {
+			memoryTop = region.end;
 		}
 	}
 	
 	console.log("Top of memory: " + toHex(memoryTop));
 	
-	// Figure out the average size of a declared memory block.
-	var averageBlockSize = 0;
-	var totalBlockMemory = 0;
+	// Figure out the average size of a declared memory region.
+	var averageRegionSize = 0;
+	var totalRegionMemory = 0;
 	
 	for (var i = 0; i < root.children.length; i++) {
-		var block = root.children[i];
+		var region = root.children[i];
 		
-		if (typeof(block.declaredSize) == "undefined") {
+		if (typeof(region.declaredSize) == "undefined") {
 			continue;
 		}
 		
-		totalBlockMemory += block.declaredSize;
+		totalRegionMemory += region.declaredSize;
 	}
 	
-	averageBlockSize = totalBlockMemory / root.children.length;
+	averageRegionSize = totalRegionMemory / root.children.length;
 	
-	console.log("Average declared block size: " + toHex(averageBlockSize));
+	console.log("Average declared region size: " + toHex(averageRegionSize));
 	
-	// If the first block doesn't start at zero, put some free space in before it. Because free
-	// space can be thousands of times larger than the blocks it surrounds, don't draw this to
+	// If the first region doesn't start at zero, put some free space in before it. Because free
+	// space can be thousands of times larger than the regions it surrounds, don't draw this to
 	// scale. Just make it about the same size as everything else.
 	if (typeof root.children !== 'undefined' && root.children.length > 0) {
-		var firstBlock = root.children[0];
+		var firstRegion = root.children[0];
 		
-		if (firstBlock.origin != 0) {
+		if (firstRegion.origin != 0) {
 			var initialFreeSpace = {"name": "FREE",
 					"children": [],
 					"origin": 0,
-					"size": averageBlockSize,
-					"sizeForLabel": firstBlock.origin,
-					"end": firstBlock.origin - 1};
+					"size": averageRegionSize,
+					"sizeForLabel": firstRegion.origin,
+					"end": firstRegion.origin - 1};
 			
-			console.log("Adding free space before first declared block: " + toHex(firstBlock.origin));
+			console.log("Adding free space before first declared region: " + toHex(firstRegion.origin));
 			// console.log(initialFreeSpace);
 			
 			root.children.push(initialFreeSpace);
@@ -323,31 +330,31 @@ var fillInBlankSpaceBetweenBlocks = function(root) {
 		}
 	}
 	
-	// Fill in the blank space between blocks. Because free space can be thousands of times larger
-	// than the blocks it surrounds, don't draw this to scale. Just make it about the same size as
+	// Fill in the blank space between regions. Because free space can be thousands of times larger
+	// than the regions it surrounds, don't draw this to scale. Just make it about the same size as
 	// everything else.
 	for (var i = 0; i < root.children.length; i++) {
-		var thisBlock = root.children[i];
-		var nextBlock = root.children[i + 1];
+		var thisRegion = root.children[i];
+		var nextRegion = root.children[i + 1];
 		
-		if (typeof nextBlock == "undefined") {
-			// End of blocks. Done.
+		if (typeof nextRegion == "undefined") {
+			// End of regions. Done.
 			break;
 		}
 		
-		var spaceBetween = nextBlock.origin - thisBlock.end;
+		var spaceBetween = nextRegion.origin - thisRegion.end;
 		
 		if (spaceBetween > 1) {
 			var freeSpace = {"name": "FREE",
 					"children": [],
-					"origin": thisBlock.end,
-					"size": averageBlockSize,
+					"origin": thisRegion.end,
+					"size": averageRegionSize,
 					"sizeForLabel": spaceBetween,
-					"end": thisBlock.end + spaceBetween};
+					"end": thisRegion.end + spaceBetween};
 			
-			console.log("Block " + thisBlock.name + " ends at " + toHex(thisBlock.end)
-					+ " and the next one, " + nextBlock.name + ", starts at "
-					+ toHex(nextBlock.origin) + ". Adding free space between blocks: "
+			console.log("Region " + thisRegion.name + " ends at " + toHex(thisRegion.end)
+					+ " and the next one, " + nextRegion.name + ", starts at "
+					+ toHex(nextRegion.origin) + ". Adding free space between regions: "
 					+ toHex(spaceBetween));
 			// console.log(freeSpace);
 			
@@ -361,24 +368,24 @@ var fillInBlankSpaceBetweenBlocks = function(root) {
 	nodes = partition.nodes(root);
 };
 
-var fillInBlankSpaceWithinBlocks = function(root) {
+var fillInBlankSpaceWithinRegions = function(root) {
 	// Let d3 calculate the size of each node based on the sum of its children.
 	var nodes = partition.nodes(root);
 	
-	// Create nodes for left over free space inside each block. This is to scale.
+	// Create nodes for left over free space inside each region. This is to scale.
 	for (var i = 0; i < root.children.length; i++) {
-		var block = root.children[i];
+		var region = root.children[i];
 		
-		if (block.value < block.declaredSize) {
+		if (region.value < region.declaredSize) {
 			var freeSpace = {"name": "FREE",
 					"children": [],
-					"size": (block.declaredSize - block.value)};
+					"size": (region.declaredSize - region.value)};
 			
-			if (typeof block.children == "undefined") {
-				block.children = [];
+			if (typeof region.children == "undefined") {
+				region.children = [];
 			}
 			
-			block.children.push(freeSpace);
+			region.children.push(freeSpace);
 		}
 	}
 	
@@ -443,13 +450,17 @@ var parseMemory = function(lines, root) {
 				continue;
 			}
 			
-			// addChunk(root, sourceFile, startAddress, size);
-			
 			// Don't bother with an "end" field on chunks.
 			var chunk = {"name": sourceFile,
 					"origin": startAddress,
 					"size": size};
 			section.children.push(chunk);
+			
+			// If we don't sort by size, the chunks stay in the order they appear in the map file.
+			if (SORT_CHUNKS_BY_SIZE) {
+				section.children.sort(sortBySize);			
+			}
+			
 			chunkCount++;
 		}
 	}
@@ -458,38 +469,38 @@ var parseMemory = function(lines, root) {
 };
 
 var addSection = function(root, sectionName, startAddress, size) {
-	// Find the first block of memory that this start address falls within.
-	var block = null;
+	// Find the first region of memory that this start address falls within.
+	var region = null;
 	
 	for (var i = 0; i < root.children.length; i++) {
 		var b = root.children[i];
 		
 		if (startAddress >= b.origin && startAddress < b.end) {
-			block = b;
+			region = b;
 			break;
 		}
 	}
 	
-	if (block == null) {
-		console.log("Can't find which block of memory" + startAddress + " is in. Ignoring section "
+	if (region == null) {
+		console.log("Can't find which region of memory" + startAddress + " is in. Ignoring section "
 				+ sectionName);
 		return;
 	}
 	
 	// Seems that d3 removes the children array when it's empty.
-	if (typeof(block.children) == "undefined") {
-		block.children = [];
+	if (typeof(region.children) == "undefined") {
+		region.children = [];
 	}
 	
-	// There shouldn't already be a section by this name in this block. Warn if so.
-	var section = block.children.filter(function(child) {
+	// There shouldn't already be a section by this name in this region. Warn if so.
+	var section = region.children.filter(function(child) {
 		return child.name == sectionName;
 	})[0];
 	
 	if (section != null) {
-		console.log("Replacing existing section " + sectionName + " in block " + block.name);
-		var index = block.children.indexOf(section);
-		block.children.splice(index, 1);
+		console.log("Replacing existing section " + sectionName + " in region " + region.name);
+		var index = region.children.indexOf(section);
+		region.children.splice(index, 1);
 	}
 	
 	section = {"name": sectionName,
@@ -497,7 +508,7 @@ var addSection = function(root, sectionName, startAddress, size) {
 			"origin": startAddress,
 			"size": size,
 			"end": (startAddress + size)};
-	block.children.push(section);
+	region.children.push(section);
 	
 	return section;
 };
@@ -513,21 +524,21 @@ var reverseChildren = function(node) {
 	}
 };
 
-var enlargeTinyBlocks = function(root) {
-	var minimumBlockValue = Math.round(memoryTop / 100000);
+var enlargeTinyRegions = function(root) {
+	var minimumRegionValue = Math.round(memoryTop / 100000);
 	
 	for (var i = 0; i < root.children.length; i++) {
-		var block = root.children[i];
+		var region = root.children[i];
 		
-		// By now, every block either has a size, calculated by d3, or a declared size from
+		// By now, every region either has a size, calculated by d3, or a declared size from
 		// the .Map file.
-		var effectiveSize = block.size ? block.size : block.declaredSize;
+		var effectiveSize = region.size ? region.size : region.declaredSize;
 		
-		if (effectiveSize < minimumBlockValue) {
-			console.log("Enlarging tiny block " + block.name + " from " + toHex(effectiveSize)
-					+ " to " + toHex(minimumBlockValue) + ".");
+		if (effectiveSize < minimumRegionValue) {
+			console.log("Enlarging tiny region " + region.name + " from " + toHex(effectiveSize)
+					+ " to " + toHex(minimumRegionValue) + ".");
 			
-			block.size = minimumBlockValue;
+			region.size = minimumregionValue;
 		}
 	}
 	
@@ -547,9 +558,15 @@ var display = function(root) {
 		ky = h / 1;
 	
 	var nodeLabel = function(d) {
+		// Don't label the root node.
+		if (d.depth == 0) {
+			return "";
+		}
+		
 		var label = d.name;
 		
 		if (typeof(d.origin) == "number" && typeof(d.end) == "number") {
+			// Label based on origin and end.
 			label += ": ";
 			var realSize = d.end - d.origin;
 			
@@ -562,6 +579,7 @@ var display = function(root) {
 			}
 		}
 		else if (typeof(d.size) == "number") {
+			// Label based on size.
 			label += ": " + toHex(d.size) + " (" + toReadbleBytes(d.size) + ")";
 		}
 		
@@ -733,6 +751,22 @@ var sortByOrigin = function(a, b) {
 		return 0;
 	}
 	else if (a.origin > b.origin) {
+		return 1;
+	}
+	else {
+		return -1;
+	}
+};
+
+var sortBySize = function(a, b) {
+	if (!a || !b) return 0;
+	
+	if (typeof a.origin == "undefined" || typeof b.origin == "undefined") return 0;
+	
+	if (a.size == b.size) {
+		return 0;
+	}
+	else if (a.size > b.size) {
 		return 1;
 	}
 	else {
