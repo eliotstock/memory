@@ -3,7 +3,7 @@ memory
 
 Visualise your linker memory map file using D3.js. Try it out here:
 
-http://htmlpreview.github.com/?https://github.com/eliotstock/memory/blob/master/index.html
+https://htmlpreview.github.io/?https://github.com/eliotstock/memory/blob/master/index.html
 
 This has only been tested on a project for the Nordic nRF51822, but should work with any *.Map file produced by the GNU linker, ld.
 
